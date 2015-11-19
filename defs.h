@@ -118,6 +118,9 @@ void            userinit(void);
 int             wait(void);
 void            wakeup(void*);
 void            yield(void);
+int             clone(void(*fcn)(void*), void *, void *); // added in clone syscall
+int             join(int); // added in join syscall 
+
 
 // swtch.S
 void            swtch(struct context**, struct context*);

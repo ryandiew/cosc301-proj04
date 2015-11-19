@@ -1,4 +1,5 @@
 /* clone twice, verify everything looks reasonable */
+/*
 #include "types.h"
 #include "user.h"
 
@@ -84,4 +85,4 @@ void worker(void *arg_ptr) {
   sleep(1);
   exit();
 }
-
+*/

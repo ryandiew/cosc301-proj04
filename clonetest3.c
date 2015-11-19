@@ -1,4 +1,5 @@
 /* clone with various bad arguments; all should fail */
+/*
 #include "types.h"
 #include "user.h"
 
@@ -39,3 +40,4 @@ void worker(void *arg_ptr) {
    printf(1, "TEST FAILED! should never get here!\n");
    exit();
 }
+*/ 

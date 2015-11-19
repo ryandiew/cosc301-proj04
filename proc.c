@@ -94,6 +94,7 @@ userinit(void)
   p->tf->ss = p->tf->ds;
   p->tf->eflags = FL_IF;
   p->tf->esp = PGSIZE;
+  p->is_thread = 0; // initializing flag as process to see if thread or process  
   p->tf->eip = 0;  // beginning of initcode.S
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
@@ -107,17 +108,33 @@ userinit(void)
 int
 growproc(int n)
 {
+  struct proc *p;
   uint sz;
-  
+  acquire(&ptable.lock);
   sz = proc->sz;
   if(n > 0){
-    if((sz = allocuvm(proc->pgdir, sz, sz + n)) == 0)
+    if((sz = allocuvm(proc->pgdir, sz, sz + n)) == 0){
+      release(&ptable.lock);
       return -1;
+    }
   } else if(n < 0){
-    if((sz = deallocuvm(proc->pgdir, sz, sz + n)) == 0)
+    if((sz = deallocuvm(proc->pgdir, sz, sz + n)) == 0){
+      release(&ptable.lock);
       return -1;
+    }
   }
   proc->sz = sz;
+
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if((proc->is_thread == 1 && p == proc->parent) || (p->parent == proc->parent)){ // if proc is thread, change fam members
+      p->sz = sz;
+    }
+    else if(proc->is_thread == 0 && p->parent == proc){
+      p->sz = sz;
+    }
+  }
+  
+  release(&ptable.lock);
   switchuvm(proc);
   return 0;
 }
@@ -196,6 +213,19 @@ exit(void)
   // Parent might be sleeping in wait().
   wakeup1(proc->parent);
 
+     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        if(p->parent == proc && p->is_thread == 1){
+	   p->killed = 1;
+	 // Wake process from sleeping
+           if(p->state == SLEEPING) {
+  	   p->state = RUNNABLE;
+	   }
+	   release(&ptable.lock);
+	   join(p->pid);
+	   acquire(&ptable.lock);
+	 }
+    }
+
   // Pass abandoned children to init.
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->parent == proc){
@@ -218,13 +248,16 @@ wait(void)
 {
   struct proc *p;
   int havekids, pid;
-
+  
+  if (proc->is_thread == 1){ // if thread return -1 b/c only wait for non-threads
+    return -1;
+  }
   acquire(&ptable.lock);
   for(;;){
     // Scan through table looking for zombie children.
     havekids = 0;
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->parent != proc)
+      if(p->parent != proc || p->is_thread == 1)
         continue;
       havekids = 1;
       if(p->state == ZOMBIE){
@@ -464,3 +497,132 @@ procdump(void)
     cprintf("\n");
   }
 }
+
+int clone(void(*fcn)(void*), void *arg, void *stack){
+   int i; 
+   int pid;
+   struct proc *np;
+   
+   if( (int) stack % PGSIZE != 0){ // make sure stack is page alligned
+     return -1;
+   } 
+   
+   if ((np = allocproc()) == 0){ // allocates process 
+     return -1;
+   }
+ 
+   // 
+   np->sz = proc->sz;
+   np->parent = proc;
+   np->pgdir = proc->pgdir;
+   
+   if (proc->is_thread == 1){
+     np->parent = proc->parent;
+   }
+   else{
+     np->parent = proc;
+   }
+
+   *np->tf = *proc->tf;
+
+    np->is_thread = 1; // sets flag to 1 indicating thread
+
+   // Clear %eax so that fork returns 0 in the child.
+   np->tf->eax = 0;
+
+   for(i = 0; i < NOFILE; i++)
+    if(proc->ofile[i])
+      np->ofile[i] = filedup(proc->ofile[i]);
+   np->cwd = idup(proc->cwd);
+
+   safestrcpy(np->name, proc->name, sizeof(proc->name));
+ 
+   pid = np->pid;
+
+   // temporary array to copy into the bottom of new stack 
+   // for the thread (i.e., to the high address in stack
+   // page, since the stack grows downward)
+   uint ustack[2];
+   uint sp = (uint)stack+PGSIZE;
+   ustack[0] = 0xffffffff; // fake return PC
+   ustack[1] = (uint)arg;
+
+   sp -= 8; // stack grows down by 2 ints/8 bytes
+   if (copyout(np->pgdir, sp, ustack, 8) < 0) {
+     // failed to copy bottom of stack into new task
+     return -1;
+   }
+   np->tf->eip = (uint)fcn;
+   np->tf->esp = sp;
+   switchuvm(np);
+   np->state = RUNNABLE;
+   
+   return pid; // return pid 
+
+}
+
+int join(int pid){ 
+   struct proc *p;
+   int havekids, return_pid;
+
+   
+     // do wait() function below to wait for all child threads
+     acquire(&ptable.lock);
+     
+     //int c_exists;
+     //int valid;
+
+     /*for(;;){ // this loop checks to see if child
+        if(p->pid == pid) {
+          c_exists = 1;
+        }
+        if(p->parent == proc && p->is_thread == 1){
+           valid = 1;
+        }
+     } 
+      
+      if((pid >=0 && c_exists == 0) || valid == 0){ //  ensure that the struct proc belongs to a child thread that belongs to the calling process, and that the pid of the child matches what we're looking for
+         release(&ptable.lock);
+         return -1;
+      }*/
+
+     for(;;){
+       // Scan through table looking for zombie children.
+       havekids = 0;
+       for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+         if(pid == p->pid && p->pgdir != proc->pgdir){
+           release(&ptable.lock);
+           return -1;
+         }
+         if(p->parent != proc || p->is_thread != 1 || p->pgdir != proc->pgdir) // if not thread or proc child then cont
+           continue;
+         havekids = 1;
+         if(p->state == ZOMBIE){
+           // Found one.
+           return_pid = p->pid;
+           kfree(p->kstack);
+           p->kstack = 0;
+           //freevm(p->pgdir);
+           p->state = UNUSED; 
+           p->pid = 0;
+           p->parent = 0;
+           p->name[0] = 0;
+           p->killed = 0;
+           release(&ptable.lock);
+           return return_pid;
+         }
+       }
+
+       // No point waiting if we don't have any children.
+       if(!havekids || proc->killed){
+         release(&ptable.lock);
+         return -1;
+       }
+       
+       
+
+       // Wait for children to exit.  (See wakeup1 call in proc_exit.)
+       sleep(proc, &ptable.lock);  //DOC: wait-sleep
+     }
+}
+
